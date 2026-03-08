@@ -1,19 +1,43 @@
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
+import { createClient } from "@/lib/supabase/server";
 
-// Inicializar cliente Stripe con la clave secreta
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-02-24.acacia",
+  apiVersion: "2026-02-25.clover",
 });
 
 const COURSE_PRICE_USD_CENTS = 19700; // $197.00
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
 
-export async function POST(request: Request) {
+export async function POST() {
   try {
-    const body = await request.json().catch(() => ({}));
-    const { userId, email } = body as { userId?: string; email?: string };
+    // 1. Verificar sesión activa de Supabase
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
+    if (!user) {
+      return NextResponse.json(
+        { error: "Debes iniciar sesión antes de comprar." },
+        { status: 401 }
+      );
+    }
+
+    // 2. Verificar que no tenga ya una compra completada
+    const { data: existing } = await supabase
+      .from("purchases")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("status", "completed")
+      .maybeSingle();
+
+    if (existing) {
+      return NextResponse.json(
+        { error: "Ya tienes acceso al curso.", redirect: "/dashboard" },
+        { status: 409 }
+      );
+    }
+
+    // 3. Crear sesión de Stripe Checkout
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -27,21 +51,17 @@ export async function POST(request: Request) {
               name: "Creación de Video con IA — Acceso Completo",
               description:
                 "Acceso vitalicio a los 4 módulos: Preproducción, Automatización, Entornos y Narrativa Histórica.",
-              images: [`${BASE_URL}/og-course.jpg`],
             },
           },
         },
       ],
-      // Pasamos el userId de Supabase en los metadatos para identificar al comprador
-      // en el webhook de Stripe.
       metadata: {
-        supabase_user_id: userId ?? "",
-        email: email ?? "",
+        supabase_user_id: user.id,
+        email: user.email ?? "",
       },
-      customer_email: email,
+      customer_email: user.email,
       success_url: `${BASE_URL}/dashboard?payment=success`,
-      cancel_url: `${BASE_URL}/#precio?payment=cancelled`,
-      // Habilitar facturación (recomendado para cumplimiento fiscal)
+      cancel_url: `${BASE_URL}/#precio`,
       invoice_creation: { enabled: true },
     });
 
@@ -55,10 +75,6 @@ export async function POST(request: Request) {
   }
 }
 
-// GET: redirigir al checkout (enlace directo desde el botón de la landing)
 export async function GET() {
-  return NextResponse.json(
-    { error: "Usa POST para iniciar el checkout." },
-    { status: 405 }
-  );
+  return NextResponse.json({ error: "Usa POST para iniciar el checkout." }, { status: 405 });
 }

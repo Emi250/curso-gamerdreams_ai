@@ -1,63 +1,59 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import Navbar from "@/components/Navbar";
+import { createClient } from "@/lib/supabase/server";
+import type { ModuleWithLessons, LessonProgress } from "@/types";
 
 export const metadata: Metadata = {
   title: "Mi Curso — Video con IA",
 };
 
-// Datos estáticos de placeholder — se reemplazarán con datos de Supabase
-const MODULES_PLACEHOLDER = [
-  {
-    id: 1,
-    slug: "preproduccion",
-    title: "Preproducción",
-    lessons: [
-      { id: 1, slug: "introduccion", title: "Introducción al módulo", duration: "12:30", completed: true },
-      { id: 2, slug: "conceptualizacion-ia", title: "Conceptualización con IA", duration: "18:45", completed: true },
-      { id: 3, slug: "guion-asistido", title: "Guión asistido por IA", duration: "24:10", completed: false },
-    ],
-  },
-  {
-    id: 2,
-    slug: "automatizacion",
-    title: "Automatización",
-    lessons: [
-      { id: 1, slug: "pipelines-intro", title: "Introducción a pipelines", duration: "15:00", completed: false },
-      { id: 2, slug: "herramientas", title: "Herramientas generativas", duration: "32:20", completed: false },
-    ],
-  },
-  {
-    id: 3,
-    slug: "entornos",
-    title: "Entornos",
-    lessons: [
-      { id: 1, slug: "worldbuilding", title: "Worldbuilding con IA", duration: "20:15", completed: false },
-    ],
-  },
-  {
-    id: 4,
-    slug: "narrativa-historica",
-    title: "Narrativa Histórica",
-    lessons: [
-      { id: 1, slug: "direccion-arte", title: "Principios de dirección de arte", duration: "28:00", completed: false },
-    ],
-  },
-];
+export default async function DashboardPage() {
+  const supabase = await createClient();
 
-export default function DashboardPage() {
-  // TODO: Verificar sesión de Supabase y compra en server component
-  // const supabase = createServerClient(...)
-  // const { data: { session } } = await supabase.auth.getSession()
-  // if (!session) redirect('/login')
-  // const { data: purchase } = await supabase.from('purchases').select().eq('user_id', session.user.id).single()
-  // if (!purchase) redirect('/#precio')
+  // 1. Verificar sesión (el middleware ya redirige, esto es doble seguro)
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
 
-  const totalLessons = MODULES_PLACEHOLDER.reduce((acc, m) => acc + m.lessons.length, 0);
-  const completedLessons = MODULES_PLACEHOLDER.reduce(
-    (acc, m) => acc + m.lessons.filter((l) => l.completed).length,
-    0
+  // 2. Verificar compra completada
+  const { data: purchase } = await supabase
+    .from("purchases")
+    .select("id, status")
+    .eq("user_id", user.id)
+    .eq("status", "completed")
+    .maybeSingle();
+
+  if (!purchase) redirect("/#precio");
+
+  // 3. Obtener módulos con sus lecciones
+  const { data: modules } = await supabase
+    .from("modules")
+    .select(`
+      id, slug, title, order,
+      lessons (
+        id, slug, title, duration, order
+      )
+    `)
+    .order("order", { ascending: true })
+    .order("order", { referencedTable: "lessons", ascending: true });
+
+  const typedModules = (modules ?? []) as ModuleWithLessons[];
+
+  // 4. Obtener progreso del usuario
+  const { data: progress } = await supabase
+    .from("lesson_progress")
+    .select("lesson_id, completed")
+    .eq("user_id", user.id);
+
+  const completedIds = new Set(
+    (progress ?? [])
+      .filter((p: Pick<LessonProgress, "lesson_id" | "completed">) => p.completed)
+      .map((p: Pick<LessonProgress, "lesson_id" | "completed">) => p.lesson_id)
   );
-  const progressPct = Math.round((completedLessons / totalLessons) * 100);
+
+  const totalLessons = typedModules.reduce((acc, m) => acc + m.lessons.length, 0);
+  const completedCount = completedIds.size;
+  const progressPct = totalLessons > 0 ? Math.round((completedCount / totalLessons) * 100) : 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -85,13 +81,13 @@ export default function DashboardPage() {
             />
           </div>
           <p className="text-xs text-muted-foreground font-sans">
-            {completedLessons} de {totalLessons} lecciones completadas
+            {completedCount} de {totalLessons} lecciones completadas
           </p>
         </div>
 
         {/* Módulos */}
         <div className="space-y-6">
-          {MODULES_PLACEHOLDER.map((mod, idx) => (
+          {typedModules.map((mod, idx) => (
             <div key={mod.id} className="border border-border bg-card overflow-hidden">
               {/* Header del módulo */}
               <div className="px-6 py-4 border-b border-border flex items-center justify-between">
@@ -108,59 +104,68 @@ export default function DashboardPage() {
 
               {/* Lecciones */}
               <ul>
-                {mod.lessons.map((lesson, lIdx) => (
-                  <li key={lesson.id}>
-                    <a
-                      href={`/curso/${mod.slug}/${lesson.slug}`}
-                      className={`flex items-center gap-4 px-6 py-4 transition-colors hover:bg-secondary/50 group ${
-                        lIdx < mod.lessons.length - 1 ? "border-b border-border" : ""
-                      }`}
-                    >
-                      {/* Indicador completado */}
-                      <div
-                        className={`w-4 h-4 border flex-shrink-0 flex items-center justify-center ${
-                          lesson.completed ? "border-primary bg-primary/20" : "border-border"
+                {mod.lessons.map((lesson, lIdx) => {
+                  const isCompleted = completedIds.has(lesson.id);
+                  return (
+                    <li key={lesson.id}>
+                      <a
+                        href={`/curso/${mod.slug}/${lesson.slug}`}
+                        className={`flex items-center gap-4 px-6 py-4 transition-colors hover:bg-secondary/50 group ${
+                          lIdx < mod.lessons.length - 1 ? "border-b border-border" : ""
                         }`}
                       >
-                        {lesson.completed && (
-                          <svg className="w-2.5 h-2.5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                            <path strokeLinecap="square" strokeLinejoin="miter" d="M5 13l4 4L19 7" />
-                          </svg>
-                        )}
-                      </div>
+                        {/* Indicador completado */}
+                        <div
+                          className={`w-4 h-4 border flex-shrink-0 flex items-center justify-center ${
+                            isCompleted ? "border-primary bg-primary/20" : "border-border"
+                          }`}
+                        >
+                          {isCompleted && (
+                            <svg
+                              className="w-2.5 h-2.5 text-primary"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth={3}
+                            >
+                              <path strokeLinecap="square" strokeLinejoin="miter" d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </div>
 
-                      {/* Número */}
-                      <span className="text-xs text-muted-foreground/50 font-sans w-6">
-                        {String(lIdx + 1).padStart(2, "0")}
-                      </span>
+                        {/* Número */}
+                        <span className="text-xs text-muted-foreground/50 font-sans w-6">
+                          {String(lIdx + 1).padStart(2, "0")}
+                        </span>
 
-                      {/* Título */}
-                      <span
-                        className={`flex-1 text-sm font-sans transition-colors group-hover:text-foreground ${
-                          lesson.completed ? "text-muted-foreground" : "text-foreground/80"
-                        }`}
-                      >
-                        {lesson.title}
-                      </span>
+                        {/* Título */}
+                        <span
+                          className={`flex-1 text-sm font-sans transition-colors group-hover:text-foreground ${
+                            isCompleted ? "text-muted-foreground" : "text-foreground/80"
+                          }`}
+                        >
+                          {lesson.title}
+                        </span>
 
-                      {/* Duración */}
-                      <span className="text-xs text-muted-foreground/50 font-sans">
-                        {lesson.duration}
-                      </span>
+                        {/* Duración */}
+                        <span className="text-xs text-muted-foreground/50 font-sans">
+                          {lesson.duration ?? "—"}
+                        </span>
 
-                      {/* Flecha */}
-                      <svg
-                        className="w-4 h-4 text-muted-foreground/30 group-hover:text-primary transition-colors"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={1.5}
-                      >
-                        <path strokeLinecap="square" d="M9 5l7 7-7 7" />
-                      </svg>
-                    </a>
-                  </li>
-                ))}
+                        {/* Flecha */}
+                        <svg
+                          className="w-4 h-4 text-muted-foreground/30 group-hover:text-primary transition-colors"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                          strokeWidth={1.5}
+                        >
+                          <path strokeLinecap="square" d="M9 5l7 7-7 7" />
+                        </svg>
+                      </a>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}

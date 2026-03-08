@@ -1,0 +1,25 @@
+import { createClient } from "@/lib/supabase/server";
+import { NextResponse } from "next/server";
+
+/**
+ * Callback de Supabase Auth.
+ * Supabase redirige aquí tras OAuth (Google) o magic link.
+ * Intercambia el código por una sesión de usuario válida.
+ */
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url);
+  const code = searchParams.get("code");
+  const next = searchParams.get("next") ?? "/dashboard";
+
+  if (code) {
+    const supabase = await createClient();
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+    if (!error) {
+      return NextResponse.redirect(`${origin}${next}`);
+    }
+  }
+
+  // Si hay error → redirigir al login con mensaje
+  return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);
+}
